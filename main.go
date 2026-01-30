@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 	"time"
 )
 
+//go:embed web/index.html
+var webContent embed.FS
+
 var defaultVoices = []string{
 	"af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky",
 	"am_adam", "am_michael",
@@ -24,14 +28,26 @@ var defaultVoices = []string{
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "web" {
+		runWebServer()
+		return
+	}
+
+	runCLI()
+}
+
+func runCLI() {
 	voice := flag.String("v", "af_heart", "voice to use")
 	speed := flag.Float64("s", 1.0, "speech speed (0.5-2.0)")
 	output := flag.String("o", "", "output file (instead of playing)")
 	listVoices := flag.Bool("voices", false, "list available voices")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: kokoro-say [options] [text]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: kokoro-say [options] [text]\n")
+		fmt.Fprintf(os.Stderr, "       kokoro-say web [--port PORT]\n\n")
 		fmt.Fprintf(os.Stderr, "Convert text to speech using Kokoro TTS.\n\n")
+		fmt.Fprintf(os.Stderr, "Commands:\n")
+		fmt.Fprintf(os.Stderr, "  web         Start web interface\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
@@ -39,6 +55,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  echo \"Hello\" | kokoro-say\n")
 		fmt.Fprintf(os.Stderr, "  kokoro-say -v bf_emma \"British accent\"\n")
 		fmt.Fprintf(os.Stderr, "  kokoro-say -o output.mp3 \"Save to file\"\n")
+		fmt.Fprintf(os.Stderr, "  kokoro-say web --port 3000\n")
 	}
 
 	flag.Parse()
@@ -57,10 +74,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	serverURL := os.Getenv("KOKORO_URL")
-	if serverURL == "" {
-		serverURL = "http://localhost:8880"
-	}
+	serverURL := getKokoroURL()
 
 	audio, err := synthesize(serverURL, text, *voice, *speed)
 	if err != nil {
@@ -81,6 +95,89 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error playing audio: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runWebServer() {
+	webFlags := flag.NewFlagSet("web", flag.ExitOnError)
+	port := webFlags.String("port", "3456", "port to listen on")
+	noBrowser := webFlags.Bool("no-browser", false, "don't open browser automatically")
+	webFlags.Parse(os.Args[2:])
+
+	kokoroURL := getKokoroURL()
+
+	// Serve the embedded HTML
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		content, _ := webContent.ReadFile("web/index.html")
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(content)
+	})
+
+	// Proxy TTS requests to Kokoro server (avoids CORS issues)
+	http.HandleFunc("/api/speech", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Forward request to Kokoro
+		resp, err := http.Post(kokoroURL+"/v1/audio/speech", "application/json", r.Body)
+		if err != nil {
+			http.Error(w, "Kokoro server unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		w.Header().Set("Content-Type", "audio/mpeg")
+		io.Copy(w, resp.Body)
+	})
+
+	// Serve voices list
+	http.HandleFunc("/api/voices", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(defaultVoices)
+	})
+
+	addr := ":" + *port
+	url := fmt.Sprintf("http://localhost%s", addr)
+
+	fmt.Printf("Starting web interface at %s\n", url)
+	fmt.Println("Press Ctrl+C to stop")
+
+	// Open browser after short delay
+	if !*noBrowser {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			openBrowser(url)
+		}()
+	}
+
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	}
+	if cmd != nil {
+		cmd.Start()
+	}
+}
+
+func getKokoroURL() string {
+	url := os.Getenv("KOKORO_URL")
+	if url == "" {
+		url = "http://localhost:8880"
+	}
+	return url
 }
 
 func getText(args []string) string {
@@ -140,13 +237,11 @@ func playAudio(audio io.Reader) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		// Prefer mpv - it handles process termination better than ffplay
 		if _, err := exec.LookPath("mpv"); err == nil {
 			cmd = exec.Command("mpv", "--no-video", "--really-quiet", "-")
 		} else if _, err := exec.LookPath("ffplay"); err == nil {
 			cmd = exec.Command("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-")
 		} else {
-			// Fallback: write to temp file for afplay
 			return playWithTempFile(audio, "afplay")
 		}
 	case "linux":
@@ -167,9 +262,6 @@ func playAudio(audio io.Reader) error {
 }
 
 func runWithCleanup(cmd *exec.Cmd, stdin io.Reader) error {
-	// Do NOT create a new process group - let child inherit parent's
-	// This way when terminal closes, SIGHUP goes to both parent and child
-
 	cmd.Stdin = stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -178,7 +270,6 @@ func runWithCleanup(cmd *exec.Cmd, stdin io.Reader) error {
 		return err
 	}
 
-	// Handle signals to kill child process
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
