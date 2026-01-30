@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -159,6 +161,17 @@ func playAudio(audio io.Reader) error {
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 
+	// Handle signals to kill child process when parent is interrupted
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sigChan
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		os.Exit(0)
+	}()
+
 	cmd.Stdin = audio
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -178,6 +191,18 @@ func playWithTempFile(audio io.Reader, player string) error {
 	f.Close()
 
 	cmd := exec.Command(player, f.Name())
+
+	// Handle signals to kill child process when parent is interrupted
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sigChan
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		os.Exit(0)
+	}()
+
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
