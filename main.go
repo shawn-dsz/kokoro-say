@@ -140,18 +140,20 @@ func playAudio(audio io.Reader) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		// ffplay supports stdin, afplay does not
-		if _, err := exec.LookPath("ffplay"); err == nil {
+		// Prefer mpv - it handles process termination better than ffplay
+		if _, err := exec.LookPath("mpv"); err == nil {
+			cmd = exec.Command("mpv", "--no-video", "--really-quiet", "-")
+		} else if _, err := exec.LookPath("ffplay"); err == nil {
 			cmd = exec.Command("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-")
 		} else {
 			// Fallback: write to temp file for afplay
 			return playWithTempFile(audio, "afplay")
 		}
 	case "linux":
-		if _, err := exec.LookPath("ffplay"); err == nil {
+		if _, err := exec.LookPath("mpv"); err == nil {
+			cmd = exec.Command("mpv", "--no-video", "--really-quiet", "-")
+		} else if _, err := exec.LookPath("ffplay"); err == nil {
 			cmd = exec.Command("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-")
-		} else if _, err := exec.LookPath("mpv"); err == nil {
-			cmd = exec.Command("mpv", "--no-video", "-")
 		} else if _, err := exec.LookPath("paplay"); err == nil {
 			return playWithTempFile(audio, "paplay")
 		} else {
@@ -165,10 +167,11 @@ func playAudio(audio io.Reader) error {
 }
 
 func runWithCleanup(cmd *exec.Cmd, stdin io.Reader) error {
-	// Set process group so child dies when parent dies
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Do NOT create a new process group - let child inherit parent's
+	// This way when terminal closes, SIGHUP goes to both parent and child
 
 	cmd.Stdin = stdin
+	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
@@ -186,8 +189,7 @@ func runWithCleanup(cmd *exec.Cmd, stdin io.Reader) error {
 
 	select {
 	case <-sigChan:
-		// Kill the entire process group
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		cmd.Process.Kill()
 		return nil
 	case err := <-done:
 		return err
