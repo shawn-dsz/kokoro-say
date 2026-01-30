@@ -9,6 +9,7 @@ A fast CLI tool to convert text to speech using a local [Kokoro](https://github.
 - Multiple voice options
 - Adjustable speech speed
 - Save to file or play directly
+- **Web interface** - browser-based UI
 - Zero dependencies beyond Go stdlib
 
 ## Requirements
@@ -65,6 +66,9 @@ kokoro-say --voices
 
 # Show help
 kokoro-say --help
+
+# Start web interface
+kokoro-say web
 ```
 
 ## Options
@@ -76,6 +80,23 @@ kokoro-say --help
 | `-o` | Output file (skip playback) | - |
 | `--voices` | List available voices | - |
 | `--help` | Show help | - |
+
+## Web Interface
+
+Start a browser-based UI:
+
+```bash
+kokoro-say web
+```
+
+This opens a simple web page where you can paste text, select a voice, and click play.
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--port` | Port to listen on | `3456` |
+| `--no-browser` | Don't auto-open browser | - |
+
+**Keyboard shortcut:** `Cmd+Enter` (or `Ctrl+Enter`) to play.
 
 ## Available Voices
 
