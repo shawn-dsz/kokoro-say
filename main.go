@@ -161,20 +161,37 @@ func playAudio(audio io.Reader) error {
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 
-	// Handle signals to kill child process when parent is interrupted
+	return runWithCleanup(cmd, audio)
+}
+
+func runWithCleanup(cmd *exec.Cmd, stdin io.Reader) error {
+	// Set process group so child dies when parent dies
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	cmd.Stdin = stdin
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// Handle signals to kill child process
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	done := make(chan error, 1)
 	go func() {
-		<-sigChan
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		os.Exit(0)
+		done <- cmd.Wait()
 	}()
 
-	cmd.Stdin = audio
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	select {
+	case <-sigChan:
+		// Kill the entire process group
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return nil
+	case err := <-done:
+		return err
+	}
 }
 
 func playWithTempFile(audio io.Reader, player string) error {
@@ -183,26 +200,13 @@ func playWithTempFile(audio io.Reader, player string) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	defer f.Close()
 
 	if _, err := io.Copy(f, audio); err != nil {
+		f.Close()
 		return err
 	}
 	f.Close()
 
 	cmd := exec.Command(player, f.Name())
-
-	// Handle signals to kill child process when parent is interrupted
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		<-sigChan
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		os.Exit(0)
-	}()
-
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return runWithCleanup(cmd, nil)
 }
